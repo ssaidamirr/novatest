@@ -1,16 +1,10 @@
-import os
-import json
-from datetime import datetime, timezone
-
-import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Candidate Test", page_icon="✅", layout="centered")
 
 TOTAL_QUESTIONS = 30
-SUBMISSIONS_FILE = "submissions.csv"
 
-# Score bands -> code
+
 def score_to_code(score: int) -> str:
     if score >= 28:
         return "OIJVBN"
@@ -243,49 +237,41 @@ ANSWER_KEY = {
 }
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def load_submissions() -> pd.DataFrame:
-    if not os.path.exists(SUBMISSIONS_FILE):
-        return pd.DataFrame(columns=["timestamp_utc", "candidate_name", "score", "code", "answers_json"])
-    try:
-        return pd.read_csv(SUBMISSIONS_FILE)
-    except Exception:
-        return pd.DataFrame(columns=["timestamp_utc", "candidate_name", "score", "code", "answers_json"])
-
-
-def append_submission(candidate_name: str, score: int, code: str, answers: dict) -> None:
-    row = {
-        "timestamp_utc": utc_now_iso(),
-        "candidate_name": candidate_name.strip(),
-        "score": score,
-        "code": code,
-        "answers_json": json.dumps(answers, ensure_ascii=False),
-    }
-    df = load_submissions()
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(SUBMISSIONS_FILE, index=False)
-
-
-def score_answers(answers: dict) -> int:
+def compute_score(answers: dict) -> int:
     score = 0
     for qid, correct in ANSWER_KEY.items():
-        if answers.get(str(qid)) == correct:
+        if answers.get(qid) == correct:
             score += 1
     return score
 
 
+def reset_test() -> None:
+    st.session_state.submitted = False
+    st.session_state.result_code = None
+    st.session_state.candidate_name = ""
+
+
 def main() -> None:
+    if "submitted" not in st.session_state:
+        reset_test()
+
     st.title("Candidate Situational Test")
 
-    st.markdown(
-        "Enter your name, answer all questions, then press Submit. "
-        "After submission you will receive a code to send to the hiring manager."
-    )
+    if st.session_state.submitted:
+        st.markdown("### Your result code")
+        st.markdown(f"## **{st.session_state.result_code}**")
+        st.caption("Send this code to the hiring manager.")
+        if st.button("Start over"):
+            reset_test()
+            st.rerun()
+        return
 
-    candidate_name = st.text_input("Candidate name", max_chars=80, placeholder="Type your full name")
+    name = st.text_input(
+        "Candidate name",
+        max_chars=80,
+        placeholder="Type your full name",
+        key="candidate_name",
+    )
 
     st.divider()
 
@@ -308,37 +294,26 @@ def main() -> None:
                 format_func=fmt,
                 key=f"q_{qid}",
             )
-            answers[str(qid)] = choice
+            answers[qid] = choice
             st.write("")
 
         submitted = st.form_submit_button("Submit")
 
     if submitted:
-        name_ok = bool(candidate_name and candidate_name.strip())
-        all_answered = all(answers.get(str(i)) in ("A", "B", "C") for i in range(1, TOTAL_QUESTIONS + 1))
-
-        if not name_ok:
+        if not name or not name.strip():
             st.error("Please enter your name before submitting.")
             return
-        if not all_answered:
+
+        if not all(answers.get(i) in ("A", "B", "C") for i in range(1, TOTAL_QUESTIONS + 1)):
             st.error("Please answer all questions before submitting.")
             return
 
-        score = score_answers(answers)
+        score = compute_score(answers)
         code = score_to_code(score)
 
-        # Save details for you (owner) to review later if needed
-        append_submission(candidate_name, score, code, answers)
-
-        # Show candidate-facing result (code only)
-        st.success("Submitted successfully.")
-        st.markdown("### Your result code")
-        st.markdown(f"## **{code}**")
-        st.caption("Send this code to the hiring manager.")
-
-        # Optional: hide the numeric score from candidate
-        # Comment this back in if you ever want them to see it:
-        # st.caption(f"(Internal score: {score}/{TOTAL_QUESTIONS})")
+        st.session_state.submitted = True
+        st.session_state.result_code = code
+        st.rerun()
 
 
 if __name__ == "__main__":
