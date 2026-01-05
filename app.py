@@ -1,17 +1,27 @@
 import os
 import json
-import ssl
-import smtplib
 from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
-
 st.set_page_config(page_title="Candidate Test", page_icon="✅", layout="centered")
 
 TOTAL_QUESTIONS = 30
 SUBMISSIONS_FILE = "submissions.csv"
+
+# Score bands -> code
+def score_to_code(score: int) -> str:
+    if score >= 28:
+        return "OIJVBN"
+    if 25 <= score <= 27:
+        return "OBRTB"
+    if 20 <= score <= 24:
+        return "IUYTH"
+    if 18 <= score <= 19:
+        return "GFTYU"
+    return "UHGTY"
+
 
 QUESTIONS = [
     {
@@ -239,59 +249,24 @@ def utc_now_iso() -> str:
 
 def load_submissions() -> pd.DataFrame:
     if not os.path.exists(SUBMISSIONS_FILE):
-        return pd.DataFrame(columns=["timestamp_utc", "candidate_name", "score", "total", "percent", "answers_json"])
+        return pd.DataFrame(columns=["timestamp_utc", "candidate_name", "score", "code", "answers_json"])
     try:
         return pd.read_csv(SUBMISSIONS_FILE)
     except Exception:
-        return pd.DataFrame(columns=["timestamp_utc", "candidate_name", "score", "total", "percent", "answers_json"])
+        return pd.DataFrame(columns=["timestamp_utc", "candidate_name", "score", "code", "answers_json"])
 
 
-def append_submission(candidate_name: str, score: int, answers: dict) -> None:
-    percent = round((score / TOTAL_QUESTIONS) * 100, 2)
+def append_submission(candidate_name: str, score: int, code: str, answers: dict) -> None:
     row = {
         "timestamp_utc": utc_now_iso(),
         "candidate_name": candidate_name.strip(),
         "score": score,
-        "total": TOTAL_QUESTIONS,
-        "percent": percent,
+        "code": code,
         "answers_json": json.dumps(answers, ensure_ascii=False),
     }
     df = load_submissions()
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df.to_csv(SUBMISSIONS_FILE, index=False)
-
-
-def get_secret(name: str, default: str = "") -> str:
-    # Works on Streamlit Cloud via st.secrets and locally via env vars
-    if name in st.secrets:
-        return str(st.secrets[name])
-    return os.getenv(name, default)
-
-
-def send_owner_email(subject: str, body: str) -> bool:
-    smtp_host = get_secret("SMTP_HOST")
-    smtp_port = int(get_secret("SMTP_PORT", "587"))
-    smtp_user = get_secret("SMTP_USER")
-    smtp_pass = get_secret("SMTP_PASS")
-    owner_email = get_secret("OWNER_EMAIL")
-
-    if not (smtp_host and smtp_user and smtp_pass and owner_email):
-        return False
-
-    msg = (
-        f"From: {smtp_user}\r\n"
-        f"To: {owner_email}\r\n"
-        f"Subject: {subject}\r\n"
-        f"\r\n"
-        f"{body}\r\n"
-    )
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls(context=context)
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, [owner_email], msg.encode("utf-8"))
-    return True
 
 
 def score_answers(answers: dict) -> int:
@@ -302,47 +277,12 @@ def score_answers(answers: dict) -> int:
     return score
 
 
-def render_admin_panel() -> None:
-    st.sidebar.markdown("## Admin")
-    admin_password = get_secret("ADMIN_PASSWORD")
-    if not admin_password:
-        st.sidebar.info("Admin panel is disabled. Set ADMIN_PASSWORD in secrets or env.")
-        return
-
-    entered = st.sidebar.text_input("Admin password", type="password")
-    if entered != admin_password:
-        st.sidebar.warning("Enter admin password to view submissions.")
-        return
-
-    st.sidebar.success("Admin access granted.")
-    st.markdown("## Submissions")
-    df = load_submissions()
-    if df.empty:
-        st.info("No submissions yet.")
-        return
-
-    # Show newest first
-    df_sorted = df.sort_values("timestamp_utc", ascending=False).reset_index(drop=True)
-    st.dataframe(df_sorted, use_container_width=True)
-
-    csv_bytes = df_sorted.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download submissions CSV",
-        data=csv_bytes,
-        file_name="submissions.csv",
-        mime="text/csv",
-    )
-
-
-def main():
+def main() -> None:
     st.title("Candidate Situational Test")
 
-    # Sidebar admin panel
-    render_admin_panel()
-
     st.markdown(
-        "### Instructions\n"
-        "Choose A, B, or C for each question. Submit when finished.\n"
+        "Enter your name, answer all questions, then press Submit. "
+        "After submission you will receive a code to send to the hiring manager."
     )
 
     candidate_name = st.text_input("Candidate name", max_chars=80, placeholder="Type your full name")
@@ -350,6 +290,7 @@ def main():
     st.divider()
 
     answers = {}
+
     with st.form("test_form", clear_on_submit=False):
         st.markdown("## Questions")
 
@@ -368,8 +309,7 @@ def main():
                 key=f"q_{qid}",
             )
             answers[str(qid)] = choice
-
-            st.write("")  # spacing
+            st.write("")
 
         submitted = st.form_submit_button("Submit")
 
@@ -385,33 +325,20 @@ def main():
             return
 
         score = score_answers(answers)
+        code = score_to_code(score)
 
-        # Save to CSV
-        append_submission(candidate_name, score, answers)
+        # Save details for you (owner) to review later if needed
+        append_submission(candidate_name, score, code, answers)
 
-        # Optional: email owner
-        emailed = False
-        try:
-            emailed = send_owner_email(
-                subject="New Candidate Test Submission",
-                body=(
-                    f"Candidate: {candidate_name.strip()}\n"
-                    f"Score: {score}/{TOTAL_QUESTIONS}\n"
-                    f"Time (UTC): {utc_now_iso()}\n"
-                ),
-            )
-        except Exception:
-            emailed = False
-
+        # Show candidate-facing result (code only)
         st.success("Submitted successfully.")
-        st.markdown(f"### Your result: **{score}/{TOTAL_QUESTIONS}**")
+        st.markdown("### Your result code")
+        st.markdown(f"## **{code}**")
+        st.caption("Send this code to the hiring manager.")
 
-        if emailed:
-            st.info("Owner notification sent.")
-        else:
-            st.info("Owner notification not configured. Submission was saved to submissions.csv.")
-
-        st.caption("You may now close this page.")
+        # Optional: hide the numeric score from candidate
+        # Comment this back in if you ever want them to see it:
+        # st.caption(f"(Internal score: {score}/{TOTAL_QUESTIONS})")
 
 
 if __name__ == "__main__":
